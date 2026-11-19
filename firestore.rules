@@ -1,0 +1,1210 @@
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // =========================================================================
+    // PHASE 3: HARDENED GLOBAL PRIMITIVES
+    // =========================================================================
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerifiedUser() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isBootstrappedOwner() {
+      return isVerifiedUser() && request.auth.token.email == 'ananyanegi1111@gmail.com';
+    }
+
+    function isPlatformOwner() {
+      return isBootstrappedOwner() ||
+        (isVerifiedUser() && exists(/databases/$(database)/documents/admins/$(request.auth.uid)));
+    }
+
+    function isReviewer() {
+      return isVerifiedUser() && exists(/databases/$(database)/documents/reviewers/$(request.auth.uid));
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isNonEmptyString(val, maxLen) {
+      return val is string && val.size() >= 1 && val.size() <= maxLen;
+    }
+
+    function isOptionalString(val, maxLen) {
+      return val is string && val.size() <= maxLen;
+    }
+
+    function isValidMemberUids(list) {
+      return list is list && list.size() >= 1 && list.size() <= 25 && list[0] is string;
+    }
+
+    function companyExists(companyId) {
+      return isValidId(companyId) && exists(/databases/$(database)/documents/companies/$(companyId));
+    }
+
+    function isCompanyMember(companyId) {
+      return isVerifiedUser() &&
+        isValidId(companyId) &&
+        exists(/databases/$(database)/documents/company_members/$(companyId + '_' + request.auth.uid)) &&
+        get(/databases/$(database)/documents/company_members/$(companyId + '_' + request.auth.uid)).data.status == 'active';
+    }
+
+    function isCompanyAdmin(companyId) {
+      return isVerifiedUser() &&
+        isValidId(companyId) &&
+        exists(/databases/$(database)/documents/company_members/$(companyId + '_' + request.auth.uid)) &&
+        get(/databases/$(database)/documents/company_members/$(companyId + '_' + request.auth.uid)).data.status == 'active' &&
+        get(/databases/$(database)/documents/company_members/$(companyId + '_' + request.auth.uid)).data.role == 'company_admin';
+    }
+
+    function isResourceMember(data) {
+      return isVerifiedUser() && (
+        data.companyOwnerUid == request.auth.uid ||
+        request.auth.uid in data.memberUids
+      );
+    }
+
+    // =========================================================================
+    // VALIDATION BLUEPRINTS (Anti-Update-Gap Helpers)
+    // =========================================================================
+
+    function isValidUser(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'role', 'status', 'createdAt', 'updatedAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'phone', 'jobTitle', 'role', 'activeCompanyId', 'status', 'createdAt', 'updatedAt']) &&
+        isValidId(data.uid) &&
+        isNonEmptyString(data.email, 254) &&
+        isNonEmptyString(data.displayName, 120) &&
+        (!('phone' in data) || isOptionalString(data.phone, 24)) &&
+        (!('jobTitle' in data) || isOptionalString(data.jobTitle, 100)) &&
+        (!('activeCompanyId' in data) || isOptionalString(data.activeCompanyId, 128)) &&
+        data.role in ['company_user', 'company_admin', 'platform_owner', 'verification_reviewer'] &&
+        data.status in ['active', 'suspended'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRecord(data) {
+      return data.keys().hasAll(['uid', 'email', 'grantedBy', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'grantedBy', 'createdAt']) &&
+        isValidId(data.uid) &&
+        isNonEmptyString(data.email, 254) &&
+        isValidId(data.grantedBy) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidReviewerRecord(data) {
+      return data.keys().hasAll(['uid', 'email', 'displayName', 'grantedBy', 'active', 'createdAt']) &&
+        data.keys().hasOnly(['uid', 'email', 'displayName', 'grantedBy', 'active', 'createdAt']) &&
+        isValidId(data.uid) &&
+        isNonEmptyString(data.email, 254) &&
+        isNonEmptyString(data.displayName, 120) &&
+        isValidId(data.grantedBy) &&
+        data.active is bool &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidCompany(data) {
+      return data.keys().hasAll([
+          'companyId', 'ownerUid', 'memberUids', 'legalName', 'businessName',
+          'companyEmail', 'contactPerson', 'mobile', 'industry', 'companySize',
+          'annualTurnoverRange', 'registeredAddress', 'state', 'city', 'pinCode',
+          'exportStatus', 'primaryBuyerRegion', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'ownerUid', 'memberUids', 'legalName', 'businessName',
+          'companyEmail', 'contactPerson', 'mobile', 'industry', 'companySize',
+          'annualTurnoverRange', 'registeredAddress', 'state', 'city', 'pinCode',
+          'gstin', 'website', 'exportStatus', 'primaryBuyerRegion', 'status',
+          'adminReviewNotes', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isValidId(data.ownerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        isNonEmptyString(data.legalName, 180) &&
+        isNonEmptyString(data.businessName, 180) &&
+        isNonEmptyString(data.companyEmail, 254) &&
+        isNonEmptyString(data.contactPerson, 120) &&
+        isNonEmptyString(data.mobile, 24) &&
+        isNonEmptyString(data.industry, 80) &&
+        isNonEmptyString(data.companySize, 60) &&
+        isNonEmptyString(data.annualTurnoverRange, 80) &&
+        isNonEmptyString(data.registeredAddress, 300) &&
+        isNonEmptyString(data.state, 80) &&
+        isNonEmptyString(data.city, 80) &&
+        isNonEmptyString(data.pinCode, 12) &&
+        (!('gstin' in data) || isOptionalString(data.gstin, 20)) &&
+        (!('website' in data) || isOptionalString(data.website, 200)) &&
+        (!('adminReviewNotes' in data) || isOptionalString(data.adminReviewNotes, 1000)) &&
+        data.exportStatus in ['Export-Oriented', 'Domestic & Export', 'Domestic Only'] &&
+        isNonEmptyString(data.primaryBuyerRegion, 80) &&
+        data.status in ['pending', 'active', 'rejected', 'suspended'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCompanyMember(data) {
+      return data.keys().hasAll([
+          'companyId', 'companyOwnerUid', 'memberUids', 'uid', 'email',
+          'displayName', 'role', 'status', 'invitedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'companyOwnerUid', 'memberUids', 'uid', 'email',
+          'displayName', 'jobTitle', 'role', 'status', 'invitedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        isValidId(data.uid) &&
+        isNonEmptyString(data.email, 254) &&
+        isNonEmptyString(data.displayName, 120) &&
+        (!('jobTitle' in data) || isOptionalString(data.jobTitle, 100)) &&
+        data.role in ['company_admin', 'company_user'] &&
+        data.status in ['active', 'invited', 'revoked'] &&
+        isValidId(data.invitedBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidFacility(data) {
+      return data.keys().hasAll([
+          'companyId', 'companyOwnerUid', 'memberUids', 'name', 'address',
+          'facilityType', 'manufacturingCategory', 'operationalStatus',
+          'reportingPeriod', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'companyOwnerUid', 'memberUids', 'name', 'address',
+          'city', 'state', 'facilityType', 'manufacturingCategory',
+          'operationalStatus', 'reportingPeriod', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        isNonEmptyString(data.name, 150) &&
+        isNonEmptyString(data.address, 300) &&
+        (!('city' in data) || isOptionalString(data.city, 80)) &&
+        (!('state' in data) || isOptionalString(data.state, 80)) &&
+        isNonEmptyString(data.facilityType, 80) &&
+        isNonEmptyString(data.manufacturingCategory, 100) &&
+        data.operationalStatus in ['Active', 'Under Commissioning', 'Inactive'] &&
+        isNonEmptyString(data.reportingPeriod, 40) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidUtilityRecord(data) {
+      return data.keys().hasAll([
+          'companyId', 'facilityId', 'facilityName', 'companyOwnerUid', 'memberUids',
+          'reportingMonth', 'energyCategory', 'quantity', 'unit', 'scope',
+          'appliedFactorValue', 'estimatedKgCo2e', 'estimatedTonnesCo2e',
+          'reviewStatus', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'facilityId', 'facilityName', 'companyOwnerUid', 'memberUids',
+          'reportingMonth', 'energyCategory', 'fuelTypeLabel', 'quantity', 'unit',
+          'electricitySource', 'renewableQuantity', 'scope', 'appliedFactorId',
+          'appliedFactorValue', 'appliedFactorVersion', 'estimatedKgCo2e',
+          'estimatedTonnesCo2e', 'attachmentDocId', 'attachmentName', 'notes',
+          'reviewStatus', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isValidId(data.facilityId) &&
+        isNonEmptyString(data.facilityName, 150) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        data.reportingMonth is string && data.reportingMonth.size() == 7 && data.reportingMonth.matches('^[0-9]{4}-[0-9]{2}$') &&
+        data.energyCategory in ['electricity', 'diesel', 'petrol', 'natural_gas', 'lpg', 'other_fuel'] &&
+        (!('fuelTypeLabel' in data) || isOptionalString(data.fuelTypeLabel, 100)) &&
+        data.quantity is number && data.quantity >= 0 && data.quantity <= 1000000000 &&
+        isNonEmptyString(data.unit, 40) &&
+        (!('electricitySource' in data) || isOptionalString(data.electricitySource, 80)) &&
+        (!('renewableQuantity' in data) || (data.renewableQuantity is number && data.renewableQuantity >= 0 && data.renewableQuantity <= 1000000000)) &&
+        data.scope in ['scope_1', 'scope_2'] &&
+        (!('appliedFactorId' in data) || isOptionalString(data.appliedFactorId, 128)) &&
+        data.appliedFactorValue is number && data.appliedFactorValue >= 0 && data.appliedFactorValue <= 100000 &&
+        (!('appliedFactorVersion' in data) || isOptionalString(data.appliedFactorVersion, 60)) &&
+        data.estimatedKgCo2e is number && data.estimatedKgCo2e >= 0 &&
+        data.estimatedTonnesCo2e is number && data.estimatedTonnesCo2e >= 0 &&
+        (!('attachmentDocId' in data) || isOptionalString(data.attachmentDocId, 128)) &&
+        (!('attachmentName' in data) || isOptionalString(data.attachmentName, 200)) &&
+        (!('notes' in data) || isOptionalString(data.notes, 500)) &&
+        data.reviewStatus in ['pending_review', 'approved_internally', 'flagged'] &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidEmissionFactor(data) {
+      return data.keys().hasAll([
+          'energyCategory', 'label', 'scope', 'factorValue', 'factorUnit',
+          'activityUnit', 'source', 'version', 'effectiveDate', 'isDemoFactor',
+          'isActive', 'visibility', 'updatedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'energyCategory', 'label', 'scope', 'factorValue', 'factorUnit',
+          'activityUnit', 'source', 'version', 'effectiveDate', 'isDemoFactor',
+          'isActive', 'visibility', 'updatedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.energyCategory in ['electricity', 'diesel', 'petrol', 'natural_gas', 'lpg', 'other_fuel'] &&
+        isNonEmptyString(data.label, 140) &&
+        data.scope in ['scope_1', 'scope_2'] &&
+        data.factorValue is number && data.factorValue >= 0 && data.factorValue <= 100000 &&
+        isNonEmptyString(data.factorUnit, 60) &&
+        isNonEmptyString(data.activityUnit, 40) &&
+        isNonEmptyString(data.source, 240) &&
+        isNonEmptyString(data.version, 40) &&
+        isNonEmptyString(data.effectiveDate, 20) &&
+        data.isDemoFactor is bool &&
+        data.isActive is bool &&
+        data.visibility in ['platform', 'archived'] &&
+        isValidId(data.updatedBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidEmissionsCalculation(data) {
+      return data.keys().hasAll([
+          'companyId', 'companyOwnerUid', 'memberUids', 'reportingPeriod',
+          'scope1Tonnes', 'scope2Tonnes', 'totalTonnes', 'electricityKwh',
+          'renewableKwh', 'recordsCount', 'missingMonths', 'calculatedBy',
+          'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'companyOwnerUid', 'memberUids', 'reportingPeriod',
+          'scope1Tonnes', 'scope2Tonnes', 'totalTonnes', 'electricityKwh',
+          'renewableKwh', 'recordsCount', 'missingMonths', 'factorSnapshotNote',
+          'calculatedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        isNonEmptyString(data.reportingPeriod, 60) &&
+        data.scope1Tonnes is number && data.scope1Tonnes >= 0 &&
+        data.scope2Tonnes is number && data.scope2Tonnes >= 0 &&
+        data.totalTonnes is number && data.totalTonnes >= 0 &&
+        data.electricityKwh is number && data.electricityKwh >= 0 &&
+        data.renewableKwh is number && data.renewableKwh >= 0 &&
+        data.recordsCount is number && data.recordsCount >= 0 &&
+        data.missingMonths is number && data.missingMonths >= 0 &&
+        (!('factorSnapshotNote' in data) || isOptionalString(data.factorSnapshotNote, 400)) &&
+        isValidId(data.calculatedBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidEsgReport(data) {
+      return data.keys().hasAll([
+          'companyId', 'companyName', 'companyOwnerUid', 'memberUids', 'title',
+          'reportingPeriod', 'organizationalBoundary', 'totalElectricityKwh',
+          'scope1Tonnes', 'scope2Tonnes', 'totalTonnes', 'dataCompletenessPct',
+          'methodology', 'limitations', 'status', 'verificationLabel',
+          'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'companyName', 'companyOwnerUid', 'memberUids', 'title',
+          'reportingPeriod', 'organizationalBoundary', 'totalElectricityKwh',
+          'renewableElectricityKwh', 'scope1Tonnes', 'scope2Tonnes', 'totalTonnes',
+          'previousPeriodTonnes', 'dataCompletenessPct', 'sustainabilityInitiatives',
+          'energyReductionSummary', 'dataSources', 'methodology', 'limitations',
+          'managementNotes', 'supportingDocCount', 'status', 'verificationLabel',
+          'reviewerFeedback', 'createdBy', 'approvedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isNonEmptyString(data.companyName, 180) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        isNonEmptyString(data.title, 180) &&
+        isNonEmptyString(data.reportingPeriod, 60) &&
+        isNonEmptyString(data.organizationalBoundary, 500) &&
+        data.totalElectricityKwh is number && data.totalElectricityKwh >= 0 &&
+        (!('renewableElectricityKwh' in data) || (data.renewableElectricityKwh is number && data.renewableElectricityKwh >= 0)) &&
+        data.scope1Tonnes is number && data.scope1Tonnes >= 0 &&
+        data.scope2Tonnes is number && data.scope2Tonnes >= 0 &&
+        data.totalTonnes is number && data.totalTonnes >= 0 &&
+        (!('previousPeriodTonnes' in data) || (data.previousPeriodTonnes is number && data.previousPeriodTonnes >= 0)) &&
+        data.dataCompletenessPct is number && data.dataCompletenessPct >= 0 && data.dataCompletenessPct <= 100 &&
+        (!('sustainabilityInitiatives' in data) || isOptionalString(data.sustainabilityInitiatives, 2000)) &&
+        (!('energyReductionSummary' in data) || isOptionalString(data.energyReductionSummary, 2000)) &&
+        (!('dataSources' in data) || isOptionalString(data.dataSources, 1200)) &&
+        isNonEmptyString(data.methodology, 1600) &&
+        isNonEmptyString(data.limitations, 1600) &&
+        (!('managementNotes' in data) || isOptionalString(data.managementNotes, 2000)) &&
+        (!('supportingDocCount' in data) || (data.supportingDocCount is number && data.supportingDocCount >= 0)) &&
+        data.status in ['draft', 'submitted', 'under_review', 'changes_requested', 'approved_internally', 'archived'] &&
+        isNonEmptyString(data.verificationLabel, 120) &&
+        (!('reviewerFeedback' in data) || isOptionalString(data.reviewerFeedback, 1500)) &&
+        isValidId(data.createdBy) &&
+        (!('approvedBy' in data) || isOptionalString(data.approvedBy, 128)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidReportReview(data) {
+      return data.keys().hasAll([
+          'companyId', 'companyName', 'companyOwnerUid', 'memberUids',
+          'reportId', 'reportTitle', 'status', 'submittedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'companyName', 'companyOwnerUid', 'memberUids',
+          'reportId', 'reportTitle', 'reviewerUid', 'reviewerName', 'status',
+          'reviewerNotes', 'correctionRequests', 'submittedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isNonEmptyString(data.companyName, 180) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        isValidId(data.reportId) &&
+        isNonEmptyString(data.reportTitle, 180) &&
+        (!('reviewerUid' in data) || isOptionalString(data.reviewerUid, 128)) &&
+        (!('reviewerName' in data) || isOptionalString(data.reviewerName, 120)) &&
+        data.status in ['pending', 'in_review', 'changes_requested', 'reviewed_indicative', 'rejected'] &&
+        (!('reviewerNotes' in data) || isOptionalString(data.reviewerNotes, 2000)) &&
+        (!('correctionRequests' in data) || isOptionalString(data.correctionRequests, 2000)) &&
+        isValidId(data.submittedBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSustainabilityProject(data) {
+      return data.keys().hasAll([
+          'companyId', 'facilityId', 'facilityName', 'companyOwnerUid', 'memberUids',
+          'name', 'category', 'startDate', 'investmentInr', 'estimatedEnergySavingsKwh',
+          'actualEnergySavingsKwh', 'estimatedCo2eReductionTonnes', 'status',
+          'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'facilityId', 'facilityName', 'companyOwnerUid', 'memberUids',
+          'name', 'category', 'startDate', 'investmentInr', 'estimatedEnergySavingsKwh',
+          'actualEnergySavingsKwh', 'estimatedCo2eReductionTonnes', 'status',
+          'supportingDocName', 'notes', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isValidId(data.facilityId) &&
+        isNonEmptyString(data.facilityName, 150) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        isNonEmptyString(data.name, 160) &&
+        data.category in [
+          'Rooftop Solar Installation', 'LED Lighting Upgrade',
+          'Energy Efficient Machinery', 'Waste Heat Recovery',
+          'Fuel Efficiency Improvements', 'Waste Reduction',
+          'Renewable Energy Procurement'
+        ] &&
+        isNonEmptyString(data.startDate, 20) &&
+        data.investmentInr is number && data.investmentInr >= 0 &&
+        data.estimatedEnergySavingsKwh is number && data.estimatedEnergySavingsKwh >= 0 &&
+        data.actualEnergySavingsKwh is number && data.actualEnergySavingsKwh >= 0 &&
+        data.estimatedCo2eReductionTonnes is number && data.estimatedCo2eReductionTonnes >= 0 &&
+        data.status in ['Planned', 'In Progress', 'Completed', 'Under Review'] &&
+        (!('supportingDocName' in data) || isOptionalString(data.supportingDocName, 200)) &&
+        (!('notes' in data) || isOptionalString(data.notes, 1000)) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidCarbonOpportunity(data) {
+      return data.keys().hasAll([
+          'companyId', 'companyName', 'companyOwnerUid', 'memberUids',
+          'baselineEmissionsTonnes', 'currentEmissionsTonnes', 'estimatedReductionTonnes',
+          'hypotheticalPriceInr', 'estimatedPotentialValueInr', 'verificationStatus',
+          'issuanceStatus', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'companyName', 'projectId', 'projectName',
+          'companyOwnerUid', 'memberUids', 'baselineEmissionsTonnes',
+          'currentEmissionsTonnes', 'estimatedReductionTonnes', 'hypotheticalPriceInr',
+          'estimatedPotentialValueInr', 'verificationStatus', 'issuanceStatus',
+          'notes', 'createdBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isNonEmptyString(data.companyName, 180) &&
+        (!('projectId' in data) || isOptionalString(data.projectId, 128)) &&
+        (!('projectName' in data) || isOptionalString(data.projectName, 160)) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        data.baselineEmissionsTonnes is number && data.baselineEmissionsTonnes >= 0 &&
+        data.currentEmissionsTonnes is number && data.currentEmissionsTonnes >= 0 &&
+        data.estimatedReductionTonnes is number && data.estimatedReductionTonnes >= 0 &&
+        data.hypotheticalPriceInr is number && data.hypotheticalPriceInr >= 0 &&
+        data.estimatedPotentialValueInr is number && data.estimatedPotentialValueInr >= 0 &&
+        data.verificationStatus == 'Awaiting Independent Verification' &&
+        data.issuanceStatus == 'Not Issued · Not Tradable' &&
+        (!('notes' in data) || isOptionalString(data.notes, 1000)) &&
+        isValidId(data.createdBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSupportingDocument(data) {
+      return data.keys().hasAll([
+          'companyId', 'companyOwnerUid', 'memberUids', 'category',
+          'fileName', 'fileType', 'fileSizeKb', 'uploadedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'companyOwnerUid', 'memberUids', 'facilityId',
+          'category', 'fileName', 'fileType', 'fileSizeKb', 'reportingMonth',
+          'referenceNote', 'uploadedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        (!('facilityId' in data) || isOptionalString(data.facilityId, 128)) &&
+        data.category in ['Electricity Bill', 'Fuel Invoice', 'Project Evidence', 'ESG Attachment', 'Other'] &&
+        isNonEmptyString(data.fileName, 200) &&
+        isNonEmptyString(data.fileType, 80) &&
+        data.fileSizeKb is number && data.fileSizeKb >= 0 && data.fileSizeKb <= 51200 &&
+        (!('reportingMonth' in data) || isOptionalString(data.reportingMonth, 20)) &&
+        (!('referenceNote' in data) || isOptionalString(data.referenceNote, 500)) &&
+        isValidId(data.uploadedBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSubscription(data) {
+      return data.keys().hasAll([
+          'companyId', 'companyName', 'companyOwnerUid', 'memberUids', 'planName',
+          'annualFeeInr', 'variableCostInr', 'paymentStatus', 'collectedAmountInr',
+          'startDate', 'renewalDate', 'updatedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'companyName', 'companyOwnerUid', 'memberUids', 'planName',
+          'annualFeeInr', 'variableCostInr', 'paymentStatus', 'collectedAmountInr',
+          'startDate', 'renewalDate', 'notes', 'updatedBy', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isNonEmptyString(data.companyName, 180) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        data.planName in ['Free Trial', 'Standard SME Annual', 'Growth Multi-Plant', 'Academic Demo Plan'] &&
+        data.annualFeeInr is number && data.annualFeeInr >= 0 &&
+        data.variableCostInr is number && data.variableCostInr >= 0 &&
+        data.paymentStatus in ['trial', 'unpaid', 'paid', 'overdue'] &&
+        data.collectedAmountInr is number && data.collectedAmountInr >= 0 &&
+        isNonEmptyString(data.startDate, 20) &&
+        isNonEmptyString(data.renewalDate, 20) &&
+        (!('notes' in data) || isOptionalString(data.notes, 500)) &&
+        isValidId(data.updatedBy) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSupportTicket(data) {
+      return data.keys().hasAll([
+          'companyId', 'companyName', 'companyOwnerUid', 'memberUids', 'subject',
+          'category', 'priority', 'status', 'description', 'createdBy',
+          'createdByName', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'companyId', 'companyName', 'companyOwnerUid', 'memberUids', 'subject',
+          'category', 'priority', 'status', 'description', 'resolutionSummary',
+          'createdBy', 'createdByName', 'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.companyId) &&
+        isNonEmptyString(data.companyName, 180) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        isNonEmptyString(data.subject, 180) &&
+        data.category in ['General Enquiry', 'Report Issue', 'Data Correction', 'Technical Support', 'Subscription'] &&
+        data.priority in ['Low', 'Medium', 'High', 'Urgent'] &&
+        data.status in ['Open', 'In Progress', 'Resolved', 'Closed'] &&
+        isNonEmptyString(data.description, 2000) &&
+        (!('resolutionSummary' in data) || isOptionalString(data.resolutionSummary, 1000)) &&
+        isValidId(data.createdBy) &&
+        isNonEmptyString(data.createdByName, 120) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSupportMessage(data) {
+      return data.keys().hasAll([
+          'ticketId', 'companyId', 'companyOwnerUid', 'memberUids',
+          'senderUid', 'senderName', 'senderRole', 'body', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'ticketId', 'companyId', 'companyOwnerUid', 'memberUids',
+          'senderUid', 'senderName', 'senderRole', 'body', 'createdAt'
+        ]) &&
+        isValidId(data.ticketId) &&
+        isValidId(data.companyId) &&
+        isValidId(data.companyOwnerUid) &&
+        isValidMemberUids(data.memberUids) &&
+        isValidId(data.senderUid) &&
+        isNonEmptyString(data.senderName, 120) &&
+        isNonEmptyString(data.senderRole, 40) &&
+        isNonEmptyString(data.body, 2000) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidSupportInternalNote(data) {
+      return data.keys().hasAll(['ticketId', 'authorUid', 'authorName', 'note', 'createdAt']) &&
+        data.keys().hasOnly(['ticketId', 'authorUid', 'authorName', 'note', 'createdAt']) &&
+        isValidId(data.ticketId) &&
+        isValidId(data.authorUid) &&
+        isNonEmptyString(data.authorName, 120) &&
+        isNonEmptyString(data.note, 2000) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidNotification(data) {
+      return data.keys().hasAll(['recipientUid', 'title', 'message', 'read', 'createdAt']) &&
+        data.keys().hasOnly(['recipientUid', 'companyId', 'title', 'message', 'read', 'createdAt']) &&
+        isValidId(data.recipientUid) &&
+        (!('companyId' in data) || isOptionalString(data.companyId, 128)) &&
+        isNonEmptyString(data.title, 160) &&
+        isNonEmptyString(data.message, 500) &&
+        data.read is bool &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidAuditLog(data) {
+      return data.keys().hasAll([
+          'actorUid', 'actorEmail', 'actorRole', 'companyId',
+          'action', 'entityType', 'summary', 'createdAt'
+        ]) &&
+        data.keys().hasOnly([
+          'actorUid', 'actorEmail', 'actorRole', 'companyId', 'companyOwnerUid',
+          'action', 'entityType', 'entityId', 'summary', 'createdAt'
+        ]) &&
+        isValidId(data.actorUid) &&
+        isNonEmptyString(data.actorEmail, 254) &&
+        isNonEmptyString(data.actorRole, 40) &&
+        isNonEmptyString(data.companyId, 128) &&
+        (!('companyOwnerUid' in data) || isOptionalString(data.companyOwnerUid, 128)) &&
+        isNonEmptyString(data.action, 120) &&
+        isNonEmptyString(data.entityType, 80) &&
+        (!('entityId' in data) || isOptionalString(data.entityId, 128)) &&
+        isNonEmptyString(data.summary, 600) &&
+        data.createdAt is timestamp;
+    }
+
+    function isValidPlatformSetting(data) {
+      return data.keys().hasAll(['settingKey', 'visibility', 'payload', 'updatedBy', 'updatedAt']) &&
+        data.keys().hasOnly(['settingKey', 'visibility', 'payload', 'updatedBy', 'updatedAt']) &&
+        isNonEmptyString(data.settingKey, 80) &&
+        data.visibility in ['platform', 'admin_only'] &&
+        data.payload is map &&
+        isValidId(data.updatedBy) &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidPublicInquiry(data) {
+      return data.keys().hasAll(['fullName', 'companyName', 'email', 'inquiryType', 'message', 'status', 'createdAt']) &&
+        data.keys().hasOnly(['fullName', 'companyName', 'email', 'phone', 'city', 'inquiryType', 'message', 'status', 'createdAt']) &&
+        isNonEmptyString(data.fullName, 120) &&
+        isNonEmptyString(data.companyName, 160) &&
+        isNonEmptyString(data.email, 254) &&
+        (!('phone' in data) || isOptionalString(data.phone, 24)) &&
+        (!('city' in data) || isOptionalString(data.city, 80)) &&
+        data.inquiryType in ['Request Demo', 'ESG Assessment', 'Partnership', 'General Enquiry'] &&
+        isNonEmptyString(data.message, 1500) &&
+        data.status in ['new', 'contacted', 'closed'] &&
+        data.createdAt is timestamp;
+    }
+
+    // =========================================================================
+    // COLLECTION RULES (All 22 Blueprint Collections)
+    // =========================================================================
+
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isPlatformOwner() || (isVerifiedUser() && request.auth.uid == userId));
+      allow list: if isBootstrappedOwner();
+      allow create: if isVerifiedUser() &&
+        isValidId(userId) &&
+        isValidUser(incoming()) &&
+        incoming().uid == request.auth.uid &&
+        userId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        incoming().status == 'active' &&
+        (
+          (isBootstrappedOwner() && incoming().role == 'platform_owner') ||
+          incoming().role in ['company_user', 'company_admin']
+        );
+      allow update: if isVerifiedUser() &&
+        isValidId(userId) &&
+        isValidUser(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            request.auth.uid == userId &&
+            incoming().role == existing().role &&
+            incoming().status == existing().status &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'phone', 'jobTitle', 'activeCompanyId', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(userId) && isPlatformOwner();
+    }
+
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isPlatformOwner() || (isVerifiedUser() && request.auth.uid == adminId));
+      allow list: if isBootstrappedOwner();
+      allow create: if isPlatformOwner() && isValidId(adminId) && isValidAdminRecord(incoming()) && incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isPlatformOwner() && isValidId(adminId);
+    }
+
+    match /reviewers/{reviewerId} {
+      allow get: if isValidId(reviewerId) && (isPlatformOwner() || (isVerifiedUser() && request.auth.uid == reviewerId));
+      allow list: if isBootstrappedOwner();
+      allow create: if isPlatformOwner() && isValidId(reviewerId) && isValidReviewerRecord(incoming()) && incoming().createdAt == request.time;
+      allow update: if isPlatformOwner() && isValidId(reviewerId) && isValidReviewerRecord(incoming()) && incoming().uid == existing().uid && incoming().createdAt == existing().createdAt;
+      allow delete: if isPlatformOwner() && isValidId(reviewerId);
+    }
+
+    match /companies/{companyId} {
+      allow get: if isValidId(companyId) && (isPlatformOwner() || isCompanyMember(companyId) || isReviewer());
+      allow list: if isBootstrappedOwner() || (isVerifiedUser() && (existing().ownerUid == request.auth.uid || request.auth.uid in existing().memberUids));
+      allow create: if isVerifiedUser() &&
+        isValidId(companyId) &&
+        isValidCompany(incoming()) &&
+        incoming().companyId == companyId &&
+        incoming().ownerUid == request.auth.uid &&
+        request.auth.uid in incoming().memberUids &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (isPlatformOwner() || incoming().status == 'pending') &&
+        existsAfter(/databases/$(database)/documents/company_members/$(companyId + '_' + request.auth.uid));
+      allow update: if isVerifiedUser() &&
+        isValidId(companyId) &&
+        isValidCompany(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().ownerUid == existing().ownerUid &&
+        existing().ownerUid in incoming().memberUids &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            isCompanyAdmin(companyId) &&
+            incoming().status == existing().status &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'legalName', 'businessName', 'companyEmail', 'contactPerson', 'mobile',
+              'industry', 'companySize', 'annualTurnoverRange', 'registeredAddress',
+              'state', 'city', 'pinCode', 'gstin', 'website', 'exportStatus',
+              'primaryBuyerRegion', 'memberUids', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(companyId) && isPlatformOwner();
+    }
+
+    match /company_members/{memberDocId} {
+      allow get: if isValidId(memberDocId) && (isPlatformOwner() || (isVerifiedUser() && (existing().uid == request.auth.uid || isCompanyMember(existing().companyId))));
+      allow list: if isBootstrappedOwner() || (isVerifiedUser() && (existing().uid == request.auth.uid || existing().companyOwnerUid == request.auth.uid || request.auth.uid in existing().memberUids));
+      allow create: if isVerifiedUser() &&
+        isValidId(memberDocId) &&
+        isValidCompanyMember(incoming()) &&
+        memberDocId == (incoming().companyId + '_' + incoming().uid) &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            incoming().uid == request.auth.uid &&
+            incoming().companyOwnerUid == request.auth.uid &&
+            incoming().role == 'company_admin' &&
+            incoming().status == 'active' &&
+            existsAfter(/databases/$(database)/documents/companies/$(incoming().companyId))
+          ) ||
+          (
+            companyExists(incoming().companyId) &&
+            isCompanyAdmin(incoming().companyId) &&
+            incoming().invitedBy == request.auth.uid
+          )
+        );
+      allow update: if isVerifiedUser() &&
+        isValidId(memberDocId) &&
+        isValidCompanyMember(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().uid == existing().uid &&
+        incoming().companyOwnerUid == existing().companyOwnerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            isCompanyAdmin(existing().companyId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['role', 'status', 'jobTitle', 'displayName', 'memberUids', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(memberDocId) && (isPlatformOwner() || isCompanyAdmin(existing().companyId));
+    }
+
+    match /facilities/{facilityId} {
+      allow get: if isValidId(facilityId) && (isPlatformOwner() || isCompanyMember(existing().companyId) || isReviewer());
+      allow list: if isBootstrappedOwner() || isResourceMember(existing());
+      allow create: if isVerifiedUser() &&
+        isValidId(facilityId) &&
+        isValidFacility(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        companyExists(incoming().companyId) &&
+        (isPlatformOwner() || isCompanyMember(incoming().companyId));
+      allow update: if isVerifiedUser() &&
+        isValidId(facilityId) &&
+        isValidFacility(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().companyOwnerUid == existing().companyOwnerUid &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            isCompanyMember(existing().companyId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'name', 'address', 'city', 'state', 'facilityType',
+              'manufacturingCategory', 'operationalStatus', 'reportingPeriod', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(facilityId) && (isPlatformOwner() || isCompanyAdmin(existing().companyId));
+    }
+
+    match /utility_records/{recordId} {
+      allow get: if isValidId(recordId) && (isPlatformOwner() || isCompanyMember(existing().companyId) || isReviewer());
+      allow list: if isBootstrappedOwner() || isResourceMember(existing());
+      allow create: if isVerifiedUser() &&
+        isValidId(recordId) &&
+        isValidUtilityRecord(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        companyExists(incoming().companyId) &&
+        (isPlatformOwner() || isCompanyMember(incoming().companyId));
+      allow update: if isVerifiedUser() &&
+        isValidId(recordId) &&
+        isValidUtilityRecord(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().companyOwnerUid == existing().companyOwnerUid &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            isCompanyAdmin(existing().companyId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'facilityId', 'facilityName', 'reportingMonth', 'energyCategory',
+              'fuelTypeLabel', 'quantity', 'unit', 'electricitySource',
+              'renewableQuantity', 'scope', 'appliedFactorId', 'appliedFactorValue',
+              'appliedFactorVersion', 'estimatedKgCo2e', 'estimatedTonnesCo2e',
+              'attachmentDocId', 'attachmentName', 'notes', 'reviewStatus', 'updatedAt'
+            ])
+          ) ||
+          (
+            isCompanyMember(existing().companyId) &&
+            incoming().reviewStatus == existing().reviewStatus &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'facilityId', 'facilityName', 'reportingMonth', 'energyCategory',
+              'fuelTypeLabel', 'quantity', 'unit', 'electricitySource',
+              'renewableQuantity', 'scope', 'appliedFactorId', 'appliedFactorValue',
+              'appliedFactorVersion', 'estimatedKgCo2e', 'estimatedTonnesCo2e',
+              'attachmentDocId', 'attachmentName', 'notes', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(recordId) && (isPlatformOwner() || isCompanyAdmin(existing().companyId));
+    }
+
+    match /emission_factors/{factorId} {
+      allow get: if isValidId(factorId) && (isPlatformOwner() || (isVerifiedUser() && existing().visibility == 'platform'));
+      allow list: if isBootstrappedOwner() || (isVerifiedUser() && existing().visibility == 'platform');
+      allow create: if isPlatformOwner() &&
+        isValidId(factorId) &&
+        isValidEmissionFactor(incoming()) &&
+        incoming().updatedBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time;
+      allow update: if isPlatformOwner() &&
+        isValidId(factorId) &&
+        isValidEmissionFactor(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedBy == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow delete: if isValidId(factorId) && isPlatformOwner();
+    }
+
+    match /emissions_calculations/{calcId} {
+      allow get: if isValidId(calcId) && (isPlatformOwner() || isCompanyMember(existing().companyId) || isReviewer());
+      allow list: if isBootstrappedOwner() || isResourceMember(existing());
+      allow create: if isVerifiedUser() &&
+        isValidId(calcId) &&
+        isValidEmissionsCalculation(incoming()) &&
+        incoming().calculatedBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        companyExists(incoming().companyId) &&
+        (isPlatformOwner() || isCompanyMember(incoming().companyId));
+      allow update: if isVerifiedUser() &&
+        isValidId(calcId) &&
+        isValidEmissionsCalculation(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().companyOwnerUid == existing().companyOwnerUid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            isCompanyMember(existing().companyId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'scope1Tonnes', 'scope2Tonnes', 'totalTonnes', 'electricityKwh',
+              'renewableKwh', 'recordsCount', 'missingMonths', 'factorSnapshotNote', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(calcId) && (isPlatformOwner() || isCompanyAdmin(existing().companyId));
+    }
+
+    match /esg_reports/{reportId} {
+      allow get: if isValidId(reportId) && (isPlatformOwner() || isCompanyMember(existing().companyId) || isReviewer());
+      allow list: if isBootstrappedOwner() || isResourceMember(existing());
+      allow create: if isVerifiedUser() &&
+        isValidId(reportId) &&
+        isValidEsgReport(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        incoming().status in ['draft', 'submitted'] &&
+        companyExists(incoming().companyId) &&
+        (isPlatformOwner() || isCompanyMember(incoming().companyId));
+      allow update: if isVerifiedUser() &&
+        isValidId(reportId) &&
+        isValidEsgReport(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().companyOwnerUid == existing().companyOwnerUid &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            existing().status != 'archived' && (
+              // Tier 1: Company Admin / CFO can edit content and approve internally or archive
+              (
+                isCompanyAdmin(existing().companyId) &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'title', 'reportingPeriod', 'organizationalBoundary', 'totalElectricityKwh',
+                  'renewableElectricityKwh', 'scope1Tonnes', 'scope2Tonnes', 'totalTonnes',
+                  'previousPeriodTonnes', 'dataCompletenessPct', 'sustainabilityInitiatives',
+                  'energyReductionSummary', 'dataSources', 'methodology', 'limitations',
+                  'managementNotes', 'supportingDocCount', 'status', 'verificationLabel',
+                  'approvedBy', 'updatedAt'
+                ])
+              ) ||
+              // Tier 2: Regular company user can edit draft/submitted content, never approve internally
+              (
+                isCompanyMember(existing().companyId) &&
+                incoming().status in ['draft', 'submitted'] &&
+                incoming().diff(existing()).affectedKeys().hasOnly([
+                  'title', 'reportingPeriod', 'organizationalBoundary', 'totalElectricityKwh',
+                  'renewableElectricityKwh', 'scope1Tonnes', 'scope2Tonnes', 'totalTonnes',
+                  'previousPeriodTonnes', 'dataCompletenessPct', 'sustainabilityInitiatives',
+                  'energyReductionSummary', 'dataSources', 'methodology', 'limitations',
+                  'managementNotes', 'supportingDocCount', 'status', 'updatedAt'
+                ])
+              ) ||
+              // Tier 3: Assigned Verification Reviewer can update review status and feedback only
+              (
+                isReviewer() &&
+                incoming().status in ['under_review', 'changes_requested'] &&
+                incoming().diff(existing()).affectedKeys().hasOnly(['status', 'verificationLabel', 'reviewerFeedback', 'updatedAt'])
+              )
+            )
+          )
+        );
+      allow delete: if isValidId(reportId) && (isPlatformOwner() || isCompanyAdmin(existing().companyId));
+    }
+
+    match /report_reviews/{reviewId} {
+      allow get: if isValidId(reviewId) && (
+        isPlatformOwner() ||
+        isCompanyMember(existing().companyId) ||
+        (isReviewer() && existing().reviewerUid == request.auth.uid)
+      );
+      allow list: if isBootstrappedOwner() ||
+        isResourceMember(existing()) ||
+        (isVerifiedUser() && existing().reviewerUid == request.auth.uid);
+      allow create: if isVerifiedUser() &&
+        isValidId(reviewId) &&
+        isValidReportReview(incoming()) &&
+        incoming().submittedBy == request.auth.uid &&
+        incoming().status == 'pending' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        companyExists(incoming().companyId) &&
+        (isPlatformOwner() || isCompanyMember(incoming().companyId));
+      allow update: if isVerifiedUser() &&
+        isValidId(reviewId) &&
+        isValidReportReview(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().reportId == existing().reportId &&
+        incoming().submittedBy == existing().submittedBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            isReviewer() &&
+            existing().reviewerUid == request.auth.uid &&
+            existing().status != 'reviewed_indicative' &&
+            existing().status != 'rejected' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['status', 'reviewerNotes', 'correctionRequests', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(reviewId) && isPlatformOwner();
+    }
+
+    match /sustainability_projects/{projectId} {
+      allow get: if isValidId(projectId) && (isPlatformOwner() || isCompanyMember(existing().companyId) || isReviewer());
+      allow list: if isBootstrappedOwner() || isResourceMember(existing());
+      allow create: if isVerifiedUser() &&
+        isValidId(projectId) &&
+        isValidSustainabilityProject(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        companyExists(incoming().companyId) &&
+        (isPlatformOwner() || isCompanyMember(incoming().companyId));
+      allow update: if isVerifiedUser() &&
+        isValidId(projectId) &&
+        isValidSustainabilityProject(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().companyOwnerUid == existing().companyOwnerUid &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            isCompanyMember(existing().companyId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'facilityId', 'facilityName', 'name', 'category', 'startDate',
+              'investmentInr', 'estimatedEnergySavingsKwh', 'actualEnergySavingsKwh',
+              'estimatedCo2eReductionTonnes', 'status', 'supportingDocName', 'notes', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(projectId) && (isPlatformOwner() || isCompanyAdmin(existing().companyId));
+    }
+
+    match /carbon_opportunities/{oppId} {
+      allow get: if isValidId(oppId) && (isPlatformOwner() || isCompanyMember(existing().companyId) || isReviewer());
+      allow list: if isBootstrappedOwner() || isResourceMember(existing());
+      allow create: if isVerifiedUser() &&
+        isValidId(oppId) &&
+        isValidCarbonOpportunity(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        companyExists(incoming().companyId) &&
+        (isPlatformOwner() || isCompanyMember(incoming().companyId));
+      allow update: if isVerifiedUser() &&
+        isValidId(oppId) &&
+        isValidCarbonOpportunity(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().companyOwnerUid == existing().companyOwnerUid &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            isCompanyMember(existing().companyId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly([
+              'projectId', 'projectName', 'baselineEmissionsTonnes', 'currentEmissionsTonnes',
+              'estimatedReductionTonnes', 'hypotheticalPriceInr', 'estimatedPotentialValueInr',
+              'notes', 'updatedAt'
+            ])
+          )
+        );
+      allow delete: if isValidId(oppId) && (isPlatformOwner() || isCompanyAdmin(existing().companyId));
+    }
+
+    match /supporting_documents/{docId} {
+      allow get: if isValidId(docId) && (isPlatformOwner() || isCompanyMember(existing().companyId) || isReviewer());
+      allow list: if isBootstrappedOwner() || isResourceMember(existing());
+      allow create: if isVerifiedUser() &&
+        isValidId(docId) &&
+        isValidSupportingDocument(incoming()) &&
+        incoming().uploadedBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        companyExists(incoming().companyId) &&
+        (isPlatformOwner() || isCompanyMember(incoming().companyId));
+      allow update: if isVerifiedUser() &&
+        isValidId(docId) &&
+        isValidSupportingDocument(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().uploadedBy == existing().uploadedBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            isCompanyMember(existing().companyId) &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['category', 'reportingMonth', 'referenceNote', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(docId) && (isPlatformOwner() || isCompanyAdmin(existing().companyId));
+    }
+
+    match /subscriptions/{subId} {
+      allow get: if isValidId(subId) && (isPlatformOwner() || isCompanyMember(existing().companyId));
+      allow list: if isBootstrappedOwner() || isResourceMember(existing());
+      allow create: if isVerifiedUser() &&
+        isValidId(subId) &&
+        isValidSubscription(incoming()) &&
+        incoming().updatedBy == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            isCompanyAdmin(incoming().companyId) &&
+            incoming().planName == 'Free Trial' &&
+            incoming().paymentStatus == 'trial' &&
+            incoming().collectedAmountInr == 0
+          )
+        );
+      allow update: if isPlatformOwner() &&
+        isValidId(subId) &&
+        isValidSubscription(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedBy == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow delete: if isValidId(subId) && isPlatformOwner();
+    }
+
+    match /support_tickets/{ticketId} {
+      allow get: if isValidId(ticketId) && (isPlatformOwner() || isCompanyMember(existing().companyId));
+      allow list: if isBootstrappedOwner() || isResourceMember(existing());
+      allow create: if isVerifiedUser() &&
+        isValidId(ticketId) &&
+        isValidSupportTicket(incoming()) &&
+        incoming().createdBy == request.auth.uid &&
+        incoming().status == 'Open' &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        companyExists(incoming().companyId) &&
+        (isPlatformOwner() || isCompanyMember(incoming().companyId));
+      allow update: if isVerifiedUser() &&
+        isValidId(ticketId) &&
+        isValidSupportTicket(incoming()) &&
+        incoming().companyId == existing().companyId &&
+        incoming().createdBy == existing().createdBy &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time && (
+          isPlatformOwner() ||
+          (
+            isCompanyMember(existing().companyId) &&
+            existing().status != 'Closed' &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['priority', 'description', 'updatedAt'])
+          )
+        );
+      allow delete: if isValidId(ticketId) && isPlatformOwner();
+    }
+
+    match /support_messages/{msgId} {
+      allow get: if isValidId(msgId) && (isPlatformOwner() || isCompanyMember(existing().companyId));
+      allow list: if isBootstrappedOwner() || isResourceMember(existing());
+      allow create: if isVerifiedUser() &&
+        isValidId(msgId) &&
+        isValidSupportMessage(incoming()) &&
+        incoming().senderUid == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        exists(/databases/$(database)/documents/support_tickets/$(incoming().ticketId)) &&
+        (isPlatformOwner() || isCompanyMember(incoming().companyId));
+      allow update: if false;
+      allow delete: if isValidId(msgId) && isPlatformOwner();
+    }
+
+    // STRICTLY ADMIN-ONLY: Company users can NEVER read or write internal support notes
+    match /support_internal_notes/{noteId} {
+      allow get: if isValidId(noteId) && isPlatformOwner();
+      allow list: if isBootstrappedOwner();
+      allow create: if isPlatformOwner() &&
+        isValidId(noteId) &&
+        isValidSupportInternalNote(incoming()) &&
+        incoming().authorUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(noteId) && isPlatformOwner();
+    }
+
+    match /notifications/{notifId} {
+      allow get: if isValidId(notifId) && (isPlatformOwner() || (isVerifiedUser() && existing().recipientUid == request.auth.uid));
+      allow list: if isBootstrappedOwner() || (isVerifiedUser() && existing().recipientUid == request.auth.uid);
+      allow create: if isVerifiedUser() &&
+        isValidId(notifId) &&
+        isValidNotification(incoming()) &&
+        incoming().createdAt == request.time &&
+        (isPlatformOwner() || incoming().recipientUid == request.auth.uid);
+      allow update: if isVerifiedUser() &&
+        isValidId(notifId) &&
+        isValidNotification(incoming()) &&
+        incoming().recipientUid == existing().recipientUid &&
+        incoming().createdAt == existing().createdAt &&
+        (isPlatformOwner() || (existing().recipientUid == request.auth.uid && incoming().diff(existing()).affectedKeys().hasOnly(['read'])));
+      allow delete: if isValidId(notifId) && (isPlatformOwner() || (isVerifiedUser() && existing().recipientUid == request.auth.uid));
+    }
+
+    // IMMUTABLE APPEND-ONLY AUDIT TRAIL
+    match /audit_logs/{logId} {
+      allow get: if isValidId(logId) && (isPlatformOwner() || (isVerifiedUser() && existing().companyOwnerUid == request.auth.uid));
+      allow list: if isBootstrappedOwner() || (isVerifiedUser() && existing().companyOwnerUid == request.auth.uid);
+      allow create: if isVerifiedUser() &&
+        isValidId(logId) &&
+        isValidAuditLog(incoming()) &&
+        incoming().actorUid == request.auth.uid &&
+        incoming().createdAt == request.time;
+      allow update: if false;
+      allow delete: if false;
+    }
+
+    match /platform_settings/{settingId} {
+      allow get: if isValidId(settingId) && (isPlatformOwner() || (isVerifiedUser() && existing().visibility == 'platform'));
+      allow list: if isBootstrappedOwner() || (isVerifiedUser() && existing().visibility == 'platform');
+      allow create: if isPlatformOwner() &&
+        isValidId(settingId) &&
+        isValidPlatformSetting(incoming()) &&
+        incoming().updatedBy == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow update: if isPlatformOwner() &&
+        isValidId(settingId) &&
+        isValidPlatformSetting(incoming()) &&
+        incoming().settingKey == existing().settingKey &&
+        incoming().updatedBy == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow delete: if isValidId(settingId) && isPlatformOwner();
+    }
+
+    // Public Website Contact & Demo Requests (Create-Only Publicly, Owner-Only Read)
+    match /public_inquiries/{inquiryId} {
+      allow get: if isValidId(inquiryId) && isPlatformOwner();
+      allow list: if isBootstrappedOwner();
+      allow create: if isValidId(inquiryId) &&
+        isValidPublicInquiry(incoming()) &&
+        incoming().status == 'new' &&
+        incoming().createdAt == request.time;
+      allow update: if isPlatformOwner() &&
+        isValidId(inquiryId) &&
+        isValidPublicInquiry(incoming()) &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status']);
+      allow delete: if isValidId(inquiryId) && isPlatformOwner();
+    }
+  }
+}

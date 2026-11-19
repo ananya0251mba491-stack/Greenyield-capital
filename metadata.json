@@ -1,0 +1,8 @@
+{
+  "name": "GreenYield Capital",
+  "description": "B2B Climate FinTech and ESG Reporting Platform for Indian SMEs — measure operational Scope 1 and Scope 2 emissions, manage energy-efficiency projects, generate structured indicative ESG reports, and estimate potential carbon opportunities.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
